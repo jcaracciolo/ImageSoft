@@ -4,11 +4,41 @@
 #include <stdio.h>
 #include <glad/glad.h>  // Initialize with gladLoadGL()
 #include <GLFW/glfw3.h>
+#include <SOIL.h>
+#include "ImageWindowState.h"
+#include <vector>
+#include <filesystem>
+#include <memory>
+#include <functional>
+#include <sstream>     
+
+using namespace std;
 
 static void glfw_error_callback(int error, const char* description)
 {
     fprintf(stderr, "Glfw Error %d: %s\n", error, description);
 }
+
+bool SimpleFileNavigation(string &path, function<void(filesystem::path)> onFileSelect)
+{
+    ImGui::Text(path.c_str());
+    if (ImGui::Button("..")) {
+        auto pathEntry = filesystem::directory_entry(path);
+        path = pathEntry.path().parent_path().string();
+    }
+    for (const auto & entry : filesystem::directory_iterator(path)) {
+        if (ImGui::Button(entry.path().filename().string().c_str())) {
+            if (entry.is_directory()) {
+                path = entry.path().string();
+            } else {
+                onFileSelect(entry.path());
+            }
+        }
+    }
+    return true;
+}
+
+
 
 int main(int, char**)
 {
@@ -65,6 +95,14 @@ int main(int, char**)
     bool show_another_window = false;
     ImVec4 clear_color = ImVec4(0.45f, 0.55f, 0.60f, 1.00f);
 
+    float zoom = 1;
+
+    auto imageWindows = vector<unique_ptr<ImageWindowState>>();
+    bool showFileSelect = false;
+    bool showFileSelectError = false;
+    int imageID = 0;
+    string path = filesystem::current_path().string();
+    char saveFileName[50] = {0};
     // Main loop
     while (!glfwWindowShouldClose(window))
     {
@@ -80,41 +118,98 @@ int main(int, char**)
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
 
-        // 1. Show the big demo window (Most of the sample code is in ImGui::ShowDemoWindow()! You can browse its code to learn more about Dear ImGui!).
+        if (showFileSelectError) {
+            ImGui::OpenPopup("Image Select Error");
+            if (ImGui::BeginPopupModal("Image Select Error", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
+                ImGui::Text("File could not be opened. Was it an Image?");
+                if (ImGui::Button("Accept")) {
+                    showFileSelectError = false;
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::EndPopup();
+            }
+
+        }
         if (show_demo_window)
             ImGui::ShowDemoWindow(&show_demo_window);
+        if (showFileSelect) {
+            ImGui::Begin("Choose File Window");
+           
+
+            // Simple File Navigation
+            SimpleFileNavigation(path, [&](filesystem::path p){
+                auto imOpt = LoadImageFile(p.string().c_str());
+                if (imOpt.has_value()) {
+                    auto val = imOpt.value();
+                    val.id = imageID++;
+                    imageWindows.push_back(make_unique<ImageWindowState>(val));
+                    showFileSelect = false;
+                } else {
+                    showFileSelectError = true;
+                }
+            });
+            ImGui::End();
+        }
+        if (ImGui::BeginMainMenuBar())
+        {
+            if (ImGui::BeginMenu("File"))
+            {
+                if (ImGui::MenuItem("Open", "Ctrl+O")) {
+                    showFileSelect = true;
+                }
+                if (ImGui::MenuItem("Save", "Ctrl+S")) {
+                    
+                }
+                if (ImGui::MenuItem("Save As..")) {}
+                ImGui::Separator();
+                if (ImGui::MenuItem("Quit", "Alt+F4")) {}
+                ImGui::EndMenu();
+            }
+            if (ImGui::BeginMenu("Edit"))
+            {
+                if (ImGui::MenuItem("Undo", "CTRL+Z")) {}
+                if (ImGui::MenuItem("Redo", "CTRL+Y", false, false)) {}  // Disabled item
+                ImGui::Separator();
+                if (ImGui::MenuItem("Cut", "CTRL+X")) {}
+                if (ImGui::MenuItem("Copy", "CTRL+C")) {}
+                if (ImGui::MenuItem("Paste", "CTRL+V")) {}
+                ImGui::EndMenu();
+            }
+            ImGui::EndMainMenuBar();
+        }
 
         // 2. Show a simple window that we create ourselves. We use a Begin/End pair to created a named window.
         {
-            static float f = 0.0f;
-            static int counter = 0;
+            for (auto it = imageWindows.begin(); it != imageWindows.end(); it++) {
+                auto im = it->get();
+                static float f = 0.0f;
+                static int counter = 0;
+                auto title = string("Image Window ").append(to_string(im->id));
+                ImGui::Begin(title.c_str());
 
-            ImGui::Begin("Hello, world!");                          // Create a window called "Hello, world!" and append into it.
-
-            ImGui::Text("This is some useful text.");               // Display some text (you can use a format strings too)
-            ImGui::Checkbox("Demo Window", &show_demo_window);      // Edit bools storing our window open/close state
-            ImGui::Checkbox("Another Window", &show_another_window);
-
-            ImGui::SliderFloat("float", &f, 0.0f, 1.0f);            // Edit 1 float using a slider from 0.0f to 1.0f
-            ImGui::ColorEdit3("clear color", (float*)&clear_color); // Edit 3 floats representing a color
-
-            if (ImGui::Button("Button"))                            // Buttons return true when clicked (most widgets return true when edited/activated)
-                counter++;
-            ImGui::SameLine();
-            ImGui::Text("counter = %d", counter);
-
-            ImGui::Text("Application average %.3f ms/frame (%.1f FPS)", 1000.0f / ImGui::GetIO().Framerate, ImGui::GetIO().Framerate);
-            ImGui::End();
-        }
-
-        // 3. Show another simple window.
-        if (show_another_window)
-        {
-            ImGui::Begin("Another Window", &show_another_window);   // Pass a pointer to our bool variable (the window will have a closing button that will clear the bool when clicked)
-            ImGui::Text("Hello from another window!");
-            if (ImGui::Button("Close Me"))
-                show_another_window = false;
-            ImGui::End();
+                if (im->texture != 0) {
+                    ImGui::SliderFloat("Zoom", &im->zoom, 0, 2.0f);
+                    ImGui::Image(reinterpret_cast<ImTextureID>(im->texture), ImVec2(im->zoom * im->width, im->zoom * im->height));
+                    if (ImGui::Button("Save")) {
+                        ImGui::OpenPopup("Save");
+                    }
+                    if (ImGui::BeginPopup("Save")) {
+                        
+                        SimpleFileNavigation(path, [&saveFileName](filesystem::path p){
+                            strncpy_s(saveFileName, p.filename().string().c_str(), 50);
+                        });
+                        ImGui::InputText("New image name", saveFileName, 50);
+                        if (ImGui::Button("Save")) {
+                            std::stringstream fnBuffer;   
+                            fnBuffer << path << "/" << string(saveFileName);   
+                            SaveImageFile(fnBuffer.str().c_str(), im);
+                            ImGui::CloseCurrentPopup();
+                        }
+                        ImGui::EndPopup();
+                    }
+                }
+                ImGui::End();
+            }
         }
 
         // Rendering
